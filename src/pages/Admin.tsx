@@ -3705,6 +3705,17 @@ function MasterTablesSection() {
                 }
               }
 
+              // Readings are stored only for devices and wells registered above: raw_sensor_data and the
+              // summary tables reference device_master and well_master, so one unregistered device (a test
+              // unit, or one with readings but no devices/ entry) made the whole batch fail.
+              const registeredDevices = new Set(
+                (await fetchAllRows('device_master', 'device_id', 'device_id')).map((row) => row.device_id),
+              );
+              const registeredWells = new Set(
+                (await fetchAllRows('well_master', 'well_id', 'well_id')).map((row) => row.well_id),
+              );
+              const skippedDevices = new Set<string>();
+
               // 2. Process Telemetry & Calculate All Summaries (B through J)
               if (readings && typeof readings === 'object') {
                 const wellReadingsByDate = new Map<string, Map<string, PumpPoint[]>>();
@@ -3715,6 +3726,10 @@ function MasterTablesSection() {
                   if (isPortableDeviceBatch(batchKey, batchNode)) continue; // synced into survey_reading below
                   const deviceId = batchKey;
                   const wellId = `WEL-${deviceId}`;
+                  if (!registeredDevices.has(deviceId) || !registeredWells.has(wellId)) {
+                    skippedDevices.add(deviceId);
+                    continue;
+                  }
 
                   const wellDepthForReadings = wellDepthMap.get(wellId);
                   const entries = Object.entries(batchNode as Record<string, any>);
@@ -4111,6 +4126,10 @@ function MasterTablesSection() {
                 title: '30-Day Firebase Data Sync Complete',
                 description: `Successfully processed ${devCount} devices and ${rawCount} raw readings into Supabase master and summary tables.${
                   surveySync ? ` Survey readings: ${surveySync.saved} saved, ${surveySync.unmatched.length} unmatched.` : ''
+                }${
+                  skippedDevices.size
+                    ? ` Skipped devices not registered in device_master/well_master: ${Array.from(skippedDevices).join(', ')}.`
+                    : ''
                 }`,
               });
 

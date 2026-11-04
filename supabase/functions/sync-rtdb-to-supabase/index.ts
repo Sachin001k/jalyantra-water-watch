@@ -360,6 +360,16 @@ serve(async (req: Request) => {
       }
     }
 
+    // Readings are stored only for devices and wells registered above: raw_sensor_data and the summary
+    // tables reference device_master and well_master, so one unregistered device made the whole batch fail.
+    const registeredDevices = new Set(
+      (await fetchAllRows(supabase, "device_master", "device_id", "device_id")).map((row) => row.device_id),
+    );
+    const registeredWells = new Set(
+      (await fetchAllRows(supabase, "well_master", "well_id", "well_id")).map((row) => row.well_id),
+    );
+    const skippedDevices = new Set<string>();
+
     // 3. Process Telemetry & Store Raw Data (B)
     if (readingsData && typeof readingsData === "object") {
       const wellReadingsByDate = new Map<string, Map<string, PumpPoint[]>>();
@@ -386,6 +396,10 @@ serve(async (req: Request) => {
 
         const deviceId = batchKey;
         const wellId = `WEL-${deviceId}`;
+        if (!registeredDevices.has(deviceId) || !registeredWells.has(wellId)) {
+          skippedDevices.add(deviceId);
+          continue;
+        }
 
         const wellDepthForReadings = wellDepthMap.get(wellId);
         const entries = Object.entries(batchNode as Record<string, any>);
@@ -768,6 +782,7 @@ serve(async (req: Request) => {
         message: "Supabase tables updated from Firebase RTDB (no hardcoded master defaults).",
         syncedDevices: syncedDevicesCount,
         syncedReadings: syncedReadingsCount,
+        skippedUnregisteredDevices: Array.from(skippedDevices),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 200 },
     );
