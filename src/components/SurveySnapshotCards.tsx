@@ -26,7 +26,9 @@ export function SurveySnapshotCards({ snapshot, isLoading }: SurveySnapshotCards
     <section className="space-y-3">
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
         <h2 className="text-sm font-semibold text-foreground uppercase tracking-wide">Latest Survey Snapshot</h2>
-        <span className="text-xs text-muted-foreground">{snapshot.surveyName}</span>
+        <span className="text-xs text-muted-foreground">
+          Survey: <span className="font-medium text-foreground">{snapshot.surveyName}</span>
+        </span>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard
