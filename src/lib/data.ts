@@ -661,6 +661,14 @@ function sortHistoryPoints(a: ExtendedHistoryPoint, b: ExtendedHistoryPoint): nu
   return a.id.localeCompare(b.id);
 }
 
+/**
+ * Devices sometimes send the same reading twice (same device, same timestamp). Keep the first of each,
+ * as Supabase does with its (device_id, timestamp) key. Expects points sorted by sortHistoryPoints.
+ */
+function dropRepeatedTimestamps(points: ExtendedHistoryPoint[]): ExtendedHistoryPoint[] {
+  return points.filter((point, i) => i === 0 || point.timestamp !== points[i - 1].timestamp);
+}
+
 /** Multiple RTDB paths can reference the same `deviceId` (e.g. flat push keys); merge into one sensor. */
 function mergeSensorsByDeviceId(sensors: SensorReading[]): SensorReading[] {
   const map = new Map<string, SensorReading>();
@@ -775,7 +783,7 @@ export function transformFirebaseReadings(raw: FirebaseReadings): SensorReading[
         if (fallback) fallbackPoints.push(fallback);
       }
 
-      const historyPoints = timestampedPoints.sort(sortHistoryPoints);
+      const historyPoints = dropRepeatedTimestamps(timestampedPoints.sort(sortHistoryPoints));
       const pointsForSensor =
         historyPoints.length > 0
           ? historyPoints
