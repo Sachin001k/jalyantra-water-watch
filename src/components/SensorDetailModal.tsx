@@ -33,6 +33,7 @@ import { PumpDrawdownChart } from '@/components/PumpDrawdownChart';
 import { DailyMedianDepthChart } from '@/components/DailyMedianDepthChart';
 import { PumpRunSummaryTable } from '@/components/PumpRunSummaryTable';
 import { downloadDataAsCsv } from '@/lib/csv';
+import { fullHistoryForExport, useSensorWithHistory } from '@/hooks/useSensorWithHistory';
 
 interface SensorDetailModalProps {
   sensor: SensorReading | null;
@@ -41,7 +42,7 @@ interface SensorDetailModalProps {
   onViewHistory?: (sensor: SensorReading) => void;
 }
 
-export function SensorDetailModal({ sensor, isOpen, onClose, onViewHistory }: SensorDetailModalProps) {
+export function SensorDetailModal({ sensor: loadedSensor, isOpen, onClose, onViewHistory }: SensorDetailModalProps) {
   const [nonPumpRange, setNonPumpRange] = useState<NonPumpRangePreset>('month');
   const [pumpRange, setPumpRange] = useState<PumpDrawdownRangePreset>('48h');
   const [locationDetails, setLocationDetails] = useState<{ villageCity: string | null; taluka: string | null } | null>(null);
@@ -50,7 +51,9 @@ export function SensorDetailModal({ sensor, isOpen, onClose, onViewHistory }: Se
   >([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
 
-  const pumpConnected = sensor ? isPumpConnectedDevice(sensor) : true;
+  const pumpConnected = loadedSensor ? isPumpConnectedDevice(loadedSensor) : true;
+  // Pump wells chart the last 48 h; other wells chart the selected 7/30/90 days.
+  const sensor = useSensorWithHistory(loadedSensor, pumpConnected ? 2 : rangeDaysForPreset(nonPumpRange));
 
   useEffect(() => {
     if (!sensor) {
@@ -190,10 +193,11 @@ export function SensorDetailModal({ sensor, isOpen, onClose, onViewHistory }: Se
   const windowStartLabel = rollingPump
     ? new Date(rollingPump.sinceMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
     : '—';
-  const handleDownloadHistory = () => {
+  const handleDownloadHistory = async () => {
+    const history = await fullHistoryForExport(sensor);
     const rows =
-      sensor.history.length > 0
-        ? sensorHistoryPointsToCsvRows([...sensor.history].reverse())
+      history.length > 0
+        ? sensorHistoryPointsToCsvRows([...history].reverse())
         : sensorsDashboardExportRows([sensor]);
 
     downloadDataAsCsv(`${sensor.deviceId}-history.csv`, rows);

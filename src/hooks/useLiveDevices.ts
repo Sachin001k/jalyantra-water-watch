@@ -2,12 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { get, ref } from 'firebase/database';
 import {
   FirebaseDevicesTree,
-  FirebaseReadings,
   SensorReading,
   mergeReadingsWithDeviceRegistry,
   transformFirebaseReadings,
 } from '@/lib/data';
 import { database } from '@/lib/firebaseClient';
+import { DEVICES_PATH, fetchDashboardReadings } from '@/lib/firebaseReadings';
 
 /** Live sensors from Firebase RTDB — for Admin device settings. */
 export function useLiveDevices() {
@@ -15,19 +15,16 @@ export function useLiveDevices() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const readingsPath = (import.meta.env.VITE_FIREBASE_READINGS_PATH as string | undefined) ?? 'readings';
-  const devicesPath = (import.meta.env.VITE_FIREBASE_DEVICES_PATH as string | undefined) ?? 'devices';
-
   const refresh = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const [readingsSnapshot, devicesSnapshot] = await Promise.all([
-        get(ref(database, readingsPath)),
-        get(ref(database, devicesPath)),
+      const [readings, devicesSnapshot] = await Promise.all([
+        fetchDashboardReadings(),
+        get(ref(database, DEVICES_PATH)),
       ]);
       const merged = mergeReadingsWithDeviceRegistry(
-        transformFirebaseReadings((readingsSnapshot.val() ?? {}) as FirebaseReadings),
+        transformFirebaseReadings(readings),
         (devicesSnapshot.val() ?? {}) as FirebaseDevicesTree,
       );
       setSensors(merged);
@@ -37,7 +34,7 @@ export function useLiveDevices() {
     } finally {
       setIsLoading(false);
     }
-  }, [readingsPath, devicesPath]);
+  }, []);
 
   useEffect(() => {
     refresh();

@@ -7,6 +7,7 @@ import {
   isUsableDepth,
   istDateKey,
   parseDeviceTimestamp,
+  pushKeyAtOrAfter,
   readingTimestampMs,
   rollingCalendarWindow,
   syncWindowStartMs,
@@ -107,5 +108,20 @@ describe('daily metrics', () => {
     const now = Date.parse('2026-10-30T10:00:00Z');
     expect(deviceHealthForDay(now - 2 * 3600_000, '2026-10-30', now)).toBe('Active');
     expect(deviceHealthForDay(now - 30 * 3600_000, '2026-10-30', now)).toBe('Offline');
+  });
+});
+
+describe('Firebase push keys', () => {
+  it('encodes the write time the way Firebase does', () => {
+    // Real key from device 11, written at 2026-11-04 14:36:26 IST.
+    const writtenAt = Date.parse('2026-11-04T14:36:26+05:30');
+    expect(pushKeyAtOrAfter(writtenAt - 1000) < '-P5_noIKa7PQjHQ6b5fE').toBe(true);
+    expect(pushKeyAtOrAfter(writtenAt + 1000) > '-P5_noIKa7PQjHQ6b5fE').toBe(true);
+  });
+
+  it('sorts in time order', () => {
+    const t = Date.parse('2026-10-01T00:00:00Z');
+    expect(pushKeyAtOrAfter(t) < pushKeyAtOrAfter(t + 1)).toBe(true);
+    expect(pushKeyAtOrAfter(t)).toHaveLength(8);
   });
 });

@@ -6,6 +6,7 @@ import {
   KPIStats,
   SensorReading,
   SensorHistoryPoint,
+  FirebaseDeviceBatch,
   FirebaseReadings,
   FirebaseDevicesTree,
   transformFirebaseReadings,
@@ -15,6 +16,14 @@ import {
   calculateKPIStats,
 } from '@/lib/data';
 import { database } from '@/lib/firebaseClient';
+import {
+  DEVICES_PATH,
+  dashboardWindowStartMs,
+  fetchDashboardReadings,
+  fetchReadingDeviceIds,
+  latestReadingQuery,
+  readingsSinceQuery,
+} from '@/lib/firebaseReadings';
 import { fetchAllDeviceMasterData, type DeviceMasterData } from '@/lib/siteAdmin';
 import { supabase } from '@/lib/supabaseClient';
 import { DEVICE_ONLINE_MAX_AGE_MS } from '../../supabase/functions/_shared/sensorLogic';
@@ -254,8 +263,6 @@ export function useGroundwaterData(): UseGroundwaterDataReturn {
   const [availableLocations, setAvailableLocations] = useState<string[]>([]);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [isCached, setIsCached] = useState(false);
-  const readingsPath = (import.meta.env.VITE_FIREBASE_READINGS_PATH as string | undefined) ?? 'readings';
-  const devicesPath = (import.meta.env.VITE_FIREBASE_DEVICES_PATH as string | undefined) ?? 'devices';
 
   // ✅ Load cached data immediately on component mount for instant display
   useEffect(() => {
@@ -365,69 +372,88 @@ export function useGroundwaterData(): UseGroundwaterDataReturn {
       });
   }, []);
 
+  // Both paths load only the last DASHBOARD_WINDOW_DAYS of readings per device (see firebaseReadings.ts).
   const fetchLatest = useCallback(async () => {
-    setIsLoading((current) => (rawSensors.length > 0 ? false : current));
     try {
-      const [readingsSnapshot, devicesSnapshot] = await Promise.all([
-        get(ref(database, readingsPath)),
-        get(ref(database, devicesPath)),
+      const [readings, devicesSnapshot] = await Promise.all([
+        fetchDashboardReadings(),
+        get(ref(database, DEVICES_PATH)),
       ]);
-      processSnapshot(
-        (readingsSnapshot.val() ?? {}) as FirebaseReadings,
-        (devicesSnapshot.val() ?? {}) as FirebaseDevicesTree,
-      );
+      processSnapshot(readings, (devicesSnapshot.val() ?? {}) as FirebaseDevicesTree);
     } catch (error) {
       console.error('Failed to fetch Firebase readings', error);
       setIsLoading(false);
     }
-  }, [processSnapshot, rawSensors.length, readingsPath, devicesPath]);
-
-  useEffect(() => {
-    fetchLatest();
-  }, [fetchLatest]);
+  }, [processSnapshot]);
 
   useEffect(() => {
     if (!isLive) return;
-    const readingsRef = ref(database, readingsPath);
-    const devicesRef = ref(database, devicesPath);
-
-    let latestReadings: FirebaseReadings = null;
+    const sinceMs = dashboardWindowStartMs();
+    const latestReadings: Record<string, FirebaseDeviceBatch> = {};
     let latestDevices: FirebaseDevicesTree = null;
-    let hasReadingsSnapshot = false;
     let hasDevicesSnapshot = false;
+    let devicesAwaitingFirstSnapshot = Number.POSITIVE_INFINITY;
+    let cancelled = false;
+    const unsubscribers: (() => void)[] = [];
 
+    // Wait until every device has reported once, so the first render isn't recomputed per device.
     const publish = () => {
-      if (!hasReadingsSnapshot || !hasDevicesSnapshot) return;
-      if (!latestReadings || Object.keys(latestReadings).length === 0) return;
-      processSnapshot(latestReadings, latestDevices);
+      if (cancelled || !hasDevicesSnapshot || devicesAwaitingFirstSnapshot > 0) return;
+      if (Object.keys(latestReadings).length === 0) return;
+      processSnapshot({ ...latestReadings }, latestDevices);
       setIsLoading(false);
     };
 
-    const unsubscribeReadings = onValue(
-      readingsRef,
-      (snapshot) => {
-        latestReadings = (snapshot.val() ?? {}) as FirebaseReadings;
-        hasReadingsSnapshot = true;
-        publish();
-      },
-      (error) => console.error('Realtime readings subscription error', error),
-    );
+    fetchReadingDeviceIds()
+      .then((deviceIds) => {
+        if (cancelled) return;
+        devicesAwaitingFirstSnapshot = deviceIds.length;
+        for (const deviceId of deviceIds) {
+          let isFirstSnapshot = true;
+          unsubscribers.push(
+            onValue(
+              readingsSinceQuery(deviceId, sinceMs),
+              async (snapshot) => {
+                if (snapshot.exists()) {
+                  latestReadings[deviceId] = snapshot.val();
+                } else {
+                  // Quiet device: show its newest reading instead of nothing.
+                  const latest = await get(latestReadingQuery(deviceId)).catch(() => null);
+                  if (latest?.exists()) latestReadings[deviceId] = latest.val();
+                }
+                if (isFirstSnapshot) {
+                  isFirstSnapshot = false;
+                  devicesAwaitingFirstSnapshot -= 1;
+                }
+                publish();
+              },
+              (error) => console.error(`Realtime readings subscription error (${deviceId})`, error),
+            ),
+          );
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to list Firebase devices', error);
+        setIsLoading(false);
+      });
 
-    const unsubscribeDevices = onValue(
-      devicesRef,
-      (snapshot) => {
-        latestDevices = (snapshot.val() ?? {}) as FirebaseDevicesTree;
-        hasDevicesSnapshot = true;
-        publish();
-      },
-      (error) => console.error('Realtime devices subscription error', error),
+    unsubscribers.push(
+      onValue(
+        ref(database, DEVICES_PATH),
+        (snapshot) => {
+          latestDevices = (snapshot.val() ?? {}) as FirebaseDevicesTree;
+          hasDevicesSnapshot = true;
+          publish();
+        },
+        (error) => console.error('Realtime devices subscription error', error),
+      ),
     );
 
     return () => {
-      unsubscribeReadings();
-      unsubscribeDevices();
+      cancelled = true;
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [isLive, processSnapshot, readingsPath, devicesPath]);
+  }, [isLive, processSnapshot]);
 
   const refreshData = useCallback(() => {
     fetchLatest();

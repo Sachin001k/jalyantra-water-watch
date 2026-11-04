@@ -11,6 +11,7 @@ import {
   buildPumpRunSegments,
   chartPointLabel,
   pumpRunSegmentsToChartRows,
+  rangeDaysForPreset,
   segmentIntoPumpEvents,
   type NonPumpRangePreset,
 } from '@/lib/pumpEvents';
@@ -19,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { PumpDrawdownChart } from '@/components/PumpDrawdownChart';
 import { downloadDataAsCsv } from '@/lib/csv';
+import { fullHistoryForExport, useSensorWithHistory } from '@/hooks/useSensorWithHistory';
 
 interface SensorHistoryModalProps {
   sensor: SensorReading | null;
@@ -26,10 +28,11 @@ interface SensorHistoryModalProps {
   onClose: () => void;
 }
 
-export function SensorHistoryModal({ sensor, isOpen, onClose }: SensorHistoryModalProps) {
-  const pumpConnected = sensor ? isPumpConnectedDevice(sensor) : true;
+export function SensorHistoryModal({ sensor: loadedSensor, isOpen, onClose }: SensorHistoryModalProps) {
+  const pumpConnected = loadedSensor ? isPumpConnectedDevice(loadedSensor) : true;
   const [activeTab, setActiveTab] = useState<'chart' | 'table'>(pumpConnected ? 'chart' : 'table');
   const [rangePreset, setRangePreset] = useState<NonPumpRangePreset>('month');
+  const sensor = useSensorWithHistory(loadedSensor, rangeDaysForPreset(rangePreset));
 
   useEffect(() => {
     setActiveTab(pumpConnected ? 'chart' : 'table');
@@ -55,7 +58,7 @@ export function SensorHistoryModal({ sensor, isOpen, onClose }: SensorHistoryMod
 
   const filteredHistory = useMemo(() => {
     const history = sensor?.history ?? [];
-    const rangeDays = rangePreset === 'week' ? 7 : rangePreset === 'month' ? 30 : 90;
+    const rangeDays = rangeDaysForPreset(rangePreset);
     const cutoff = latestTimestamp - rangeDays * 24 * 60 * 60 * 1000;
     return history
       .filter((point) => Number.isFinite(point.timestamp) && point.timestamp >= cutoff)
@@ -93,10 +96,11 @@ export function SensorHistoryModal({ sensor, isOpen, onClose }: SensorHistoryMod
 
   if (!sensor) return null;
 
-  const handleExportHistory = () => {
+  const handleExportHistory = async () => {
+    const history = await fullHistoryForExport(sensor);
     const rows =
-      sensor.history.length > 0
-        ? sensorHistoryPointsToCsvRows(sensor.history.slice().reverse())
+      history.length > 0
+        ? sensorHistoryPointsToCsvRows(history.slice().reverse())
         : sensorsDashboardExportRows([sensor]);
 
     downloadDataAsCsv(`${sensor.deviceId}-full-history.csv`, rows);

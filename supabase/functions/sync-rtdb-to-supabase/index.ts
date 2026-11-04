@@ -9,6 +9,7 @@ import {
   deviceHealthForDay,
   depthChangeOverDays,
   detectPumpRunRanges,
+  fetchRtdbReadingsSince,
   isCountablePumpRun,
   istDateKey,
   istNoonIso,
@@ -164,15 +165,16 @@ serve(async (req: Request) => {
 
     // 1. Fetch devices and readings nodes from Firebase
     const authQuery = firebaseAuthToken ? `?auth=${firebaseAuthToken}` : "";
-    const [devicesRes, readingsRes] = await Promise.all([
+    // Only the window's readings are downloaded (see fetchRtdbReadingsSince), not the whole history.
+    const [devicesRes, windowReadings] = await Promise.all([
       fetch(`${targetRtdbUrl}/devices.json${authQuery}`).catch(() => null),
-      fetch(`${targetRtdbUrl}/readings.json${authQuery}`).catch(() => null),
+      fetchRtdbReadingsSince(targetRtdbUrl, readingsCutoffMs, { authToken: firebaseAuthToken || undefined }),
     ]);
 
     const devicesData = devicesRes && devicesRes.ok ? await devicesRes.json() : {};
     // deno-lint-ignore prefer-const -- explicitly freed below once extracted; the raw Firebase payload
-    // (every reading, before windowing/dedup) is the single largest thing in memory for this function.
-    let readingsData = readingsRes && readingsRes.ok ? await readingsRes.json() : {};
+    // is the single largest thing in memory for this function.
+    let readingsData: Record<string, unknown> | null = windowReadings;
 
     let syncedDevicesCount = 0;
     let syncedReadingsCount = 0;

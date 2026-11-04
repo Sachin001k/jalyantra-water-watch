@@ -58,6 +58,7 @@ import {
   addDaysToDateKey,
   depthChangeOverDays,
   detectPumpRunRanges,
+  fetchRtdbReadingsSince,
   deviceHealthForDay,
   isCountablePumpRun,
   istDateKey,
@@ -3454,28 +3455,26 @@ function MasterTablesSection() {
 
               console.log('[Firebase Sync] Fetching devices and readings from Firebase RTDB:', rtdbUrl);
 
-              const [devRes, readRes] = await Promise.all([
+              // Starts at 00:00 IST so the first day is processed whole — its pump runs are deleted and rebuilt below.
+              const cutoffTimeMs = syncWindowStartMs(timeRangeDays);
+              const windowStartDate = istDateKey(cutoffTimeMs);
+
+              // Only the selected window's readings are downloaded, not the whole history.
+              const [devRes, readings] = await Promise.all([
                 fetch(`${rtdbUrl}/devices.json?auth=${apiKey}`).catch((err) => {
                   console.error('[Firebase Sync] Devices fetch error:', err);
                   return null;
                 }),
-                fetch(`${rtdbUrl}/readings.json?auth=${apiKey}`).catch((err) => {
-                  console.error('[Firebase Sync] Readings fetch error:', err);
-                  return null;
-                }),
+                fetchRtdbReadingsSince(rtdbUrl, cutoffTimeMs, { authToken: apiKey }),
               ]);
 
               console.log('[Firebase Sync] Devices HTTP status:', devRes?.status, devRes?.ok);
-              console.log('[Firebase Sync] Readings HTTP status:', readRes?.status, readRes?.ok);
+              console.log('[Firebase Sync] Readings fetched for devices:', Object.keys(readings).length);
 
               const devices = devRes && devRes.ok ? await devRes.json() : {};
-              const readings = readRes && readRes.ok ? await readRes.json() : {};
 
               let devCount = 0;
               let rawCount = 0;
-              // Starts at 00:00 IST so the first day is processed whole — its pump runs are deleted and rebuilt below.
-              const cutoffTimeMs = syncWindowStartMs(timeRangeDays);
-              const windowStartDate = istDateKey(cutoffTimeMs);
 
               // Seed Static Alert Definitions (Table I)
               await supabase.from('alert_definitions').upsert([

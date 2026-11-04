@@ -307,13 +307,37 @@ function collectPortableReadings(readings: Record<string, unknown>): PortableRea
  * Only the newest reading per (survey, well) is kept. A survey with no Pending wells left after
  * the sync is marked Completed automatically.
  */
+/**
+ * Just the portable devices' readings. Each device is probed with its newest reading first, so the
+ * fixed sensors' long histories are never downloaded.
+ */
+async function fetchPortableReadingBatches(): Promise<Record<string, unknown>> {
+  const rtdbGet = async (path: string, query = '') => {
+    const res = await fetch(`${RTDB_URL}/readings${path}.json?auth=${RTDB_API_KEY}${query}`);
+    if (!res.ok) throw new Error(`Firebase readings fetch failed (HTTP ${res.status})`);
+    return res.json();
+  };
+  const deviceIds = Object.keys((await rtdbGet('', '&shallow=true')) ?? {});
+  const out: Record<string, unknown> = {};
+  await Promise.all(
+    deviceIds.map(async (deviceId) => {
+      const path = `/${encodeURIComponent(deviceId)}`;
+      if (!/^porta/i.test(deviceId)) {
+        const newest = await rtdbGet(path, `&orderBy=${encodeURIComponent('"$key"')}&limitToLast=1`);
+        if (!isPortableDeviceBatch(deviceId, newest)) return;
+      }
+      out[deviceId] = await rtdbGet(path);
+    }),
+  );
+  return out;
+}
+
 export async function syncPortableReadings(): Promise<PortableSyncResult> {
-  const [readingsRes, pushedMeta] = await Promise.all([
-    fetch(`${RTDB_URL}/readings.json?auth=${RTDB_API_KEY}`),
+  const [readings, pushedMeta] = await Promise.all([
+    fetchPortableReadingBatches(),
     fetchFirebaseSurveyMeta().catch(() => null),
   ]);
-  if (!readingsRes.ok) throw new Error(`Firebase readings fetch failed (HTTP ${readingsRes.status})`);
-  const portable = collectPortableReadings((await readingsRes.json()) ?? {});
+  const portable = collectPortableReadings(readings);
   const result: PortableSyncResult = { saved: 0, unchanged: 0, unmatched: [], completedSurveyIds: [] };
   if (!portable.length) return result;
 

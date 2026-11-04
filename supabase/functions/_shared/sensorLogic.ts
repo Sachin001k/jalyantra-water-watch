@@ -290,3 +290,55 @@ export function deviceHealthForDay(lastReadingMs: number, dateKey: string, nowMs
   const dayEndMs = Math.min(istMidnightMs(addDaysToDateKey(dateKey, 1)), nowMs);
   return dayEndMs - lastReadingMs <= DEVICE_ONLINE_MAX_AGE_MS ? "Active" : "Offline";
 }
+
+// ============================================================================
+// Firebase reads — fetch only the window needed, not every reading ever sent.
+// ============================================================================
+
+const PUSH_KEY_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
+
+/**
+ * Smallest Firebase push key written at or after `ms`. A push key starts with its creation time, so
+ * ordering a device's readings by key and starting here makes Firebase send only readings since `ms`.
+ */
+export function pushKeyAtOrAfter(ms: number): string {
+  let rest = Math.max(0, Math.floor(ms));
+  let key = "";
+  for (let i = 0; i < 8; i++) {
+    key = PUSH_KEY_CHARS[rest % 64] + key;
+    rest = Math.floor(rest / 64);
+  }
+  return key;
+}
+
+/**
+ * Readings written since `sinceMs`, shaped like the full `readings` node ({ deviceId: { pushKey: reading } }).
+ * Lists devices with a shallow read, then asks Firebase for each device's window, so the download
+ * grows with the window instead of with the whole history.
+ */
+export async function fetchRtdbReadingsSince(
+  rtdbUrl: string,
+  sinceMs: number,
+  opts: { authToken?: string; readingsPath?: string } = {},
+): Promise<Record<string, Record<string, unknown>>> {
+  const path = opts.readingsPath ?? "readings";
+  const auth = opts.authToken ? `&auth=${encodeURIComponent(opts.authToken)}` : "";
+  const listRes = await fetch(`${rtdbUrl}/${path}.json?shallow=true${auth}`);
+  if (!listRes.ok) throw new Error(`Firebase device list fetch failed (HTTP ${listRes.status})`);
+  const deviceIds = Object.keys((await listRes.json()) ?? {});
+
+  const startAt = encodeURIComponent(JSON.stringify(pushKeyAtOrAfter(sinceMs)));
+  const orderBy = encodeURIComponent(JSON.stringify("$key"));
+  const out: Record<string, Record<string, unknown>> = {};
+  await Promise.all(
+    deviceIds.map(async (deviceId) => {
+      const res = await fetch(
+        `${rtdbUrl}/${path}/${encodeURIComponent(deviceId)}.json?orderBy=${orderBy}&startAt=${startAt}${auth}`,
+      );
+      if (!res.ok) throw new Error(`Firebase readings fetch failed for ${deviceId} (HTTP ${res.status})`);
+      const batch = await res.json();
+      if (batch && typeof batch === "object" && Object.keys(batch).length > 0) out[deviceId] = batch;
+    }),
+  );
+  return out;
+}
