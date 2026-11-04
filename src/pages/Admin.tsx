@@ -3528,6 +3528,15 @@ function MasterTablesSection() {
                 return rows;
               };
 
+              // Writes in batches and stops on the first error. One request per row made a 365-day
+              // rebuild take thousands of requests, and unchecked errors let a failed save look like success.
+              const upsertAll = async (table: string, rows: Record<string, unknown>[], onConflict: string) => {
+                for (let i = 0; i < rows.length; i += 500) {
+                  const { error } = await supabase.from(table).upsert(rows.slice(i, i + 500), { onConflict });
+                  if (error) throw new Error(`Saving ${table} failed: ${errorMessage(error)}`);
+                }
+              };
+
               // One alert per episode: raised the first day its trigger condition holds, expired the
               // first later day its exit condition holds (alert_definitions.expiry_logic). alertedDates
               // stops a re-run over the same window from raising a second alert for a day already logged.
@@ -3757,8 +3766,8 @@ function MasterTablesSection() {
                 // The (device_id, timestamp) unique constraint does the duplicate check — a pre-select
                 // was capped at 1,000 rows by PostgREST and so missed most existing rows.
                 const rowsToUpsert = Array.from(uniqueRowsMap.values());
-                for (let i = 0; i < rowsToUpsert.length; i += 200) {
-                  const chunk = rowsToUpsert.slice(i, i + 200);
+                for (let i = 0; i < rowsToUpsert.length; i += 1000) {
+                  const chunk = rowsToUpsert.slice(i, i + 1000);
                   const { error } = await supabase
                     .from('raw_sensor_data')
                     .upsert(chunk, { onConflict: 'device_id,timestamp', ignoreDuplicates: true });
@@ -3785,6 +3794,7 @@ function MasterTablesSection() {
                     runsByDate.set(runDate, list);
                   }
 
+                  const wellRunRows: Record<string, unknown>[] = [];
                   for (const dateStr of dateMap.keys()) {
                     const runs = runsByDate.get(dateStr) || [];
                     const rowsForDate = runs.map(({ start, end }, idx) => {
@@ -3805,11 +3815,19 @@ function MasterTablesSection() {
                       };
                     });
 
-                    await supabase.from('pump_run_summary').delete().eq('well_id', wellId).eq('run_date', dateStr);
-                    if (rowsForDate.length > 0) {
-                      await supabase.from('pump_run_summary').upsert(rowsForDate, { onConflict: 'well_id,pump_start_time,pump_stop_time' });
-                    }
+                    wellRunRows.push(...rowsForDate);
                   }
+
+                  const wellDates = Array.from(dateMap.keys());
+                  for (let i = 0; i < wellDates.length; i += 100) {
+                    const { error } = await supabase
+                      .from('pump_run_summary')
+                      .delete()
+                      .eq('well_id', wellId)
+                      .in('run_date', wellDates.slice(i, i + 100));
+                    if (error) throw new Error(`Clearing pump_run_summary failed: ${errorMessage(error)}`);
+                  }
+                  await upsertAll('pump_run_summary', wellRunRows, 'well_id,pump_start_time,pump_stop_time');
                 }
 
                 // Pull real pump run data — this is the single source of truth for run counts/runtime/extraction.
@@ -3860,6 +3878,9 @@ function MasterTablesSection() {
                   priorExtractionByWell.get(row.well_id)!.set(row.date, Number(row.daily_water_extraction_liters) || 0);
                 }
 
+                const weeklyWellRows: Record<string, unknown>[] = [];
+                const dailyWellRows: Record<string, unknown>[] = [];
+                const dailyHealthRows: Record<string, unknown>[] = [];
                 for (const [wellId, dateMap] of wellReadingsByDate.entries()) {
                   const sortedDates = Array.from(dateMap.keys()).sort();
                   const wellDepth = wellDepthMap.get(wellId);
@@ -3922,10 +3943,10 @@ function MasterTablesSection() {
                       }
                       districtWeeklyAgg.set(wAggKey, wAgg);
                     }
-                    await supabase.from('weekly_monthly_well_summary').upsert(weeklyPayload, { onConflict: 'well_id, calculation_date' });
+                    weeklyWellRows.push(weeklyPayload);
 
                     // Daily Well Summary (D)
-                    await supabase.from('daily_well_summary').upsert({
+                    dailyWellRows.push({
                       well_id: wellId,
                       date: dateStr,
                       daily_median_water_depth_meters: medianDepth,
@@ -3940,14 +3961,14 @@ function MasterTablesSection() {
                           ? remainingVolumeLiters / avgSevenDayExtractionLiters
                           : null,
                       updated_at: new Date().toISOString(),
-                    }, { onConflict: 'well_id, date' });
+                    });
 
                     // Daily Well Health Summary (F)
                     let healthStatus = 'Green';
                     if (dryRunRisk) healthStatus = 'Red';
                     else if (!safePumpOp) healthStatus = 'Amber';
 
-                    await supabase.from('daily_well_health_summary').upsert({
+                    dailyHealthRows.push({
                       well_id: wellId,
                       date: dateStr,
                       well_health_status: healthStatus,
@@ -3956,7 +3977,7 @@ function MasterTablesSection() {
                       safe_pump_operation_boolean: safePumpOp,
                       device_health_status: deviceHealthForDay(lastReadingMs, dateStr),
                       updated_at: new Date().toISOString(),
-                    }, { onConflict: 'well_id, date' });
+                    });
 
                     // Alert Log Generation (J)
                     const alertChecks = [
@@ -3981,7 +4002,7 @@ function MasterTablesSection() {
                       if (check.triggered && !open) {
                         const datedKey = `${check.code}_${wellId}_${dateStr}`;
                         if (alertedDates.has(datedKey)) continue;
-                        const { data: inserted } = await supabase.from('alert_logs').insert({
+                        const { data: inserted, error: alertError } = await supabase.from('alert_logs').insert({
                           alert_code: check.code,
                           well_id: wellId,
                           district: district || null,
@@ -3992,13 +4013,15 @@ function MasterTablesSection() {
                           status: 'active',
                           triggered_at: istNoonIso(dateStr),
                         }).select('alert_id').maybeSingle();
+                        if (alertError) throw new Error(`Saving alert_logs failed: ${errorMessage(alertError)}`);
                         alertedDates.add(datedKey);
                         if (inserted?.alert_id) openAlerts.set(openKey, { alertId: inserted.alert_id, date: dateStr });
                       } else if (check.cleared && open && open.date < dateStr) {
-                        await supabase
+                        const { error: expireError } = await supabase
                           .from('alert_logs')
                           .update({ status: 'expired', expired_at: istNoonIso(dateStr) })
                           .eq('alert_id', open.alertId);
+                        if (expireError) throw new Error(`Expiring alert failed: ${errorMessage(expireError)}`);
                         openAlerts.delete(openKey);
                       }
                     }
@@ -4022,10 +4045,15 @@ function MasterTablesSection() {
                   }
                 }
 
+                await upsertAll('weekly_monthly_well_summary', weeklyWellRows, 'well_id, calculation_date');
+                await upsertAll('daily_well_summary', dailyWellRows, 'well_id, date');
+                await upsertAll('daily_well_health_summary', dailyHealthRows, 'well_id, date');
+
                 // 4. Compute Per-District Summaries (G, H) from real aggregated Firebase-derived data
+                const districtDailyRows: Record<string, unknown>[] = [];
                 for (const [aggKey, agg] of districtDailyAgg.entries()) {
                   const [districtName, dateStr] = aggKey.split('__');
-                  await supabase.from('district_daily_summary').upsert({
+                  districtDailyRows.push({
                     district: districtName,
                     date: dateStr,
                     total_active_wells_per_district: agg.wells.size,
@@ -4034,8 +4062,9 @@ function MasterTablesSection() {
                     avg_water_depth_per_district_meters: agg.depthCount > 0 ? agg.depthSum / agg.depthCount : null,
                     avg_daily_pump_runtime_per_district_minutes: agg.wells.size > 0 ? agg.runtime / agg.wells.size : null,
                     updated_at: new Date().toISOString(),
-                  }, { onConflict: 'district, date' });
+                  });
                 }
+                await upsertAll('district_daily_summary', districtDailyRows, 'district, date');
 
                 // 5. Weekly/Monthly District Summary (H) — 7/30-day depth change averaged across the
                 // district's wells (from districtWeeklyAgg above); 30-day extraction as a rolling sum
@@ -4048,6 +4077,7 @@ function MasterTablesSection() {
                   series.push({ date: dateStr, extraction: agg.extraction });
                   districtDailySeries.set(districtName, series);
                 }
+                const districtWeeklyRows: Record<string, unknown>[] = [];
                 for (const [districtName, series] of districtDailySeries.entries()) {
                   series.sort((a, b) => a.date.localeCompare(b.date));
                   for (let i = 0; i < series.length; i++) {
@@ -4055,21 +4085,20 @@ function MasterTablesSection() {
                     const last30 = series.slice(Math.max(0, i - 29), i + 1);
                     const thirtyDayExtraction = last30.reduce((sum, d) => sum + d.extraction, 0);
                     const wAgg = districtWeeklyAgg.get(`${districtName}__${dateStr}`);
-                    const districtWeeklyPayload: Record<string, unknown> = {
+                    // Every row carries the same columns, as a batched upsert requires; no data → null.
+                    districtWeeklyRows.push({
                       district: districtName,
                       calculation_date: dateStr,
                       thirty_day_water_extraction_per_district_liters: thirtyDayExtraction,
+                      avg_seven_day_depth_change_per_district_meters:
+                        wAgg && wAgg.sevenDayCount > 0 ? wAgg.sevenDaySum / wAgg.sevenDayCount : null,
+                      avg_thirty_day_depth_change_per_district_meters:
+                        wAgg && wAgg.thirtyDayCount > 0 ? wAgg.thirtyDaySum / wAgg.thirtyDayCount : null,
                       updated_at: new Date().toISOString(),
-                    };
-                    if (wAgg && wAgg.sevenDayCount > 0) {
-                      districtWeeklyPayload.avg_seven_day_depth_change_per_district_meters = wAgg.sevenDaySum / wAgg.sevenDayCount;
-                      districtWeeklyPayload.avg_thirty_day_depth_change_per_district_meters = wAgg.thirtyDaySum / wAgg.thirtyDayCount;
-                    }
-                    await supabase
-                      .from('weekly_monthly_district_summary')
-                      .upsert(districtWeeklyPayload, { onConflict: 'district, calculation_date' });
+                    });
                   }
                 }
+                await upsertAll('weekly_monthly_district_summary', districtWeeklyRows, 'district, calculation_date');
               }
 
               // Portable (Porta-*) readings were skipped above — they go to survey_reading instead.
