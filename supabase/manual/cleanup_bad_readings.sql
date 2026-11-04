@@ -1,6 +1,11 @@
 -- Manual, one-off clean-up of bad rows found in the Oct 2026 code review.
 -- NOT a migration — run by hand in the Supabase SQL editor, AFTER a "Last 365 Days" Fetch & Populate
--- with the fixed sync code (so every late copy has its correctly timed twin).
+-- with the fixed sync code.
+--
+-- 5h30m-late copies are NOT matched here. An earlier version matched "same depth exactly 5h30m earlier",
+-- but devices report about once a minute and depth often holds steady for hours, so that also matched
+-- genuine readings (it flagged 44% of rows). Late copies were found instead by comparing every row's
+-- device, time and depth against Firebase, and deleted by id (2026-11-04).
 -- The SQL editor only shows the LAST statement's result, so run each step on its own:
 -- select the step's lines and press Run.
 
@@ -17,15 +22,6 @@ ALTER TABLE public.raw_sensor_data_backup_20261030 ENABLE ROW LEVEL SECURITY;
 SELECT
   (SELECT count(*) FROM public.raw_sensor_data) AS total_rows,
   (SELECT count(*) FROM public.raw_sensor_data_backup_20261030) AS backup_rows,
-  -- 1. Copies stored 5h30m late: the old server sync read IST device times as UTC. The late copy is
-  --    the one with an identical reading (same device, same depth) exactly 5h30m EARLIER.
-  (SELECT count(*) FROM public.raw_sensor_data late
-    WHERE EXISTS (
-      SELECT 1 FROM public.raw_sensor_data ok
-      WHERE ok.device_id = late.device_id
-        AND ok.timestamp = late.timestamp - interval '5 hours 30 minutes'
-        AND ok.depth_meters = late.depth_meters
-    )) AS late_copies,
   -- 2. Readings stamped "now" by the old Admin sync. Devices send whole seconds, so a timestamp with
   --    milliseconds can only have come from the sync's own clock.
   (SELECT count(*) FROM public.raw_sensor_data
@@ -43,14 +39,6 @@ SELECT
 -- ============================================================================
 BEGIN;
 
-DELETE FROM public.raw_sensor_data late
-WHERE EXISTS (
-  SELECT 1 FROM public.raw_sensor_data ok
-  WHERE ok.device_id = late.device_id
-    AND ok.timestamp = late.timestamp - interval '5 hours 30 minutes'
-    AND ok.depth_meters = late.depth_meters
-);
-
 DELETE FROM public.raw_sensor_data
 WHERE extract(milliseconds FROM timestamp)::numeric % 1000 <> 0;
 
@@ -64,7 +52,7 @@ UPDATE public.well_master SET status = 'Inactive' WHERE well_id LIKE 'WEL-DEMO%'
 
 COMMIT;
 
--- Afterwards: run STEP B again (all three groups should be 0), then rebuild the derived tables with
+-- Afterwards: run STEP B again (both groups should be 0), then rebuild the derived tables with
 -- Admin → "Last 365 Days" → Fetch & Populate, so pump_run_summary, daily/weekly summaries and
 -- alert_logs are recomputed from clean readings. To undo before the rebuild, restore from
 -- raw_sensor_data_backup_20261030.
