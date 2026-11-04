@@ -132,6 +132,11 @@ export function KPICards({ stats, isLoading }: KPICardsProps) {
     );
   }
 
+
+  // Rounded to the 0.1 m shown, so a change that displays as 0.0 m reads "Stable", not "-0m".
+  const declineM = Math.round(stats.fastestDeclineRate * 10) / 10;
+  const hasDecline = declineM > 0;
+
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <KPICard
@@ -165,13 +170,13 @@ export function KPICards({ stats, isLoading }: KPICardsProps) {
       />
       <KPICard
         title="Fastest Decline"
-        value={stats.fastestDecliningDistrict}
-        subtitle={`-${stats.fastestDeclineRate}m in 30 days`}
+        value={hasDecline ? stats.fastestDecliningDistrict : 'Stable'}
+        subtitle={hasDecline ? `-${declineM.toFixed(1)}m in 30 days` : 'No change in 30 days'}
         icon={TrendingDown}
-        trend="down"
-        trendValue={`-${stats.fastestDeclineRate}m`}
-        accentColor="#ef4444"
-        accentBg="rgba(239,68,68,0.10)"
+        trend={hasDecline ? 'down' : 'neutral'}
+        trendValue={hasDecline ? `-${declineM.toFixed(1)}m` : '0.0m'}
+        accentColor={hasDecline ? '#ef4444' : '#64748b'}
+        accentBg={hasDecline ? 'rgba(239,68,68,0.10)' : 'rgba(100,116,139,0.10)'}
         delay={0.24}
       />
     </div>
